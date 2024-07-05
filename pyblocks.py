@@ -56,16 +56,6 @@ class Quad:
             'ROTATE_RIGHT': self.if_rotate_right,
         }
 
-    @classmethod
-    def get_new_quad(cls):
-        """
-        Returns an instance of the next Quad piece that should spawn.
-        """
-        #TODO: - Implement bag of 7
-        #      - Display next three pieces
-        quad_type = random.choice(list(cls.QUAD_SPAWNS.keys()))
-        return Quad(quad_type)
-
     def update_coords(self, updated_coords):
         """
         Update the coordinates of the Quad piece.
@@ -132,6 +122,23 @@ class Quad:
         return potential_coords
 
 
+class Bag:
+    """
+    Class used to get new pieces based on "bag of 7" method.
+    """
+    def __init__(self):
+        self.index = 0
+        self.piece_types = ['LINE', 'SQUARE', 'L', 'J', 'S', 'Z', 'T']
+        random.shuffle(self.piece_types)
+
+    def create_quad(self):
+        if self.index > len(self.piece_types) - 1:
+            random.shuffle(self.piece_types)
+            self.index = 0
+        self.index += 1
+        return Quad(self.piece_types[self.index - 1])
+
+
 class Board:
     """
     Class representing the game board.
@@ -155,6 +162,7 @@ class Board:
         ]
         self.board_lock = threading.Lock()
         self.active_quad = None
+        self.bag = Bag()
         self.game_over = False
         self.score = 0
         # Initialise the input handler and pass it a callback function pointer.
@@ -255,7 +263,7 @@ class Board:
             raise RuntimeError(
                 'Attempted to spawn a quad when one was already active.'
             )
-        self.active_quad = Quad.get_new_quad()
+        self.active_quad = self.bag.create_quad()
         if not self.update_board_list(self.active_quad.coords):
             self.game_over = True
 
