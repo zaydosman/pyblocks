@@ -159,7 +159,7 @@ class Board:
         self.score = 0
         # Initialise the input handler and pass it a callback function pointer.
         self.input_handler = kb_input.AsyncInputHandler(
-            self.update_active_quad)
+            self.input_handler_callback)
         self.stack = contextlib.ExitStack()
 
     def __enter__(self):
@@ -199,13 +199,9 @@ class Board:
             return True
         return False
 
-    def _update_board_list(self, add_coords, remove_coords=[]):
+    def update_board_list(self, add_coords, remove_coords=[]):
         """
         Update coordinates on the board, either setting or unsetting them.
-
-        NOTE: Do NOT use on its own. Before using this function:
-              - Use `_coords_available()` on all input coordinates.
-              - Acquire `self.board_lock()`.
 
         Parameters
         ----------
@@ -215,50 +211,52 @@ class Board:
         remove_coords: list[list[int, int]]
             List of set coordinates to unset.
         """
-        for coord in add_coords:
-            if self.board_list[coord[1]][coord[0]]:
-                raise RuntimeError(f'Attempted to set a set coord '
-                                   f'({coord[0]}, {coord[1]}).')
-            self.board_list[coord[1]][coord[0]] = 1
+        with self.board_lock:
+            if not self._coords_available(add_coords):
+                return False
 
-        for coord in remove_coords:
-            if not self.board_list[coord[1]][coord[0]]:
-                raise RuntimeError(f'Attempted to unset an unset coord '
-                                   f'({coord[0]}, {coord[1]}).')
-            self.board_list[coord[1]][coord[0]] = 0
+            for coord in add_coords:
+                if self.board_list[coord[1]][coord[0]]:
+                    raise RuntimeError(f'Attempted to set a set coord '
+                                       f'({coord[0]}, {coord[1]}).')
+                self.board_list[coord[1]][coord[0]] = 1
 
-    def _update_line_filled(self):
+            for coord in remove_coords:
+                if not self.board_list[coord[1]][coord[0]]:
+                    raise RuntimeError(f'Attempted to unset an unset coord '
+                                       f'({coord[0]}, {coord[1]}).')
+                self.board_list[coord[1]][coord[0]] = 0
+
+            return True
+
+
+    def update_line_filled(self):
         """
         Clears any fully set row on the board and adds an empty one to the top.
-
-        NOTE: Do NOT use on its own. Before using this function:
-              - Acquire `self.board_lock()`.
         """
         #TODO: Consider implementing linked list.
-        for row_idx in range(len(self.board_list)):
-            if all(self.board_list[row_idx]):
-                del self.board_list[row_idx]
-                self.board_list.insert(0, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
-                #TODO: Update scoring to increase when:
-                #      - A line is filled for consecutive Quads.
-                #      - Multiple lines are filled with one active Quad.
-                #      - Level up?
-                self.score += 1
-        debug.print_board(self)
+        with self.board_lock:
+            for row_idx in range(len(self.board_list)):
+                if all(self.board_list[row_idx]):
+                    del self.board_list[row_idx]
+                    self.board_list.insert(0, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+                    #TODO: Update scoring to increase when:
+                    #      - A line is filled for consecutive Quads.
+                    #      - Multiple lines are filled with one active Quad.
+                    #      - Level up?
+                    self.score += 1
+            debug.print_board(self)
 
     def spawn_quad(self):
         """
         Gets a new Quad piece and sets the active Quad to it.
         """
-        with self.board_lock:
-            if self.active_quad:
-                raise RuntimeError(
-                    'Attempted to spawn a quad when one was already active.'
-                )
-            self.active_quad = Quad.get_new_quad()
-            if self._coords_available(self.active_quad.coords):
-                self._update_board_list(self.active_quad.coords)
-                return
+        if self.active_quad:
+            raise RuntimeError(
+                'Attempted to spawn a quad when one was already active.'
+            )
+        self.active_quad = Quad.get_new_quad()
+        if not self.update_board_list(self.active_quad.coords):
             self.game_over = True
 
     def update_active_quad(self, action):
@@ -274,10 +272,6 @@ class Board:
         action: str
             Action describing how to move the active Quad.
         """
-        if action == 'QUIT':
-            self.game_over = True
-            return
-
         if not self.active_quad:
             return
 
@@ -287,25 +281,30 @@ class Board:
                 f'{self.active_quad.actions.keys()}'
             )
 
-        with self.board_lock:
-            updated_coords = self.active_quad.actions[action]()
-            new_coords = [coord for coord in updated_coords
-                          if coord not in self.active_quad.coords]
-            remove_coords = [coord for coord in self.active_quad.coords
-                             if coord not in updated_coords]
+        updated_coords = self.active_quad.actions[action]()
+        new_coords = [coord for coord in updated_coords
+                      if coord not in self.active_quad.coords]
+        remove_coords = [coord for coord in self.active_quad.coords
+                         if coord not in updated_coords]
 
-            if self._coords_available(new_coords):
-                self._update_board_list(new_coords,
-                                        remove_coords=remove_coords)
-                self.active_quad.update_coords(updated_coords)
-                debug.print_board(self)
-                return
+        if self.update_board_list(new_coords, remove_coords=remove_coords):
+            self.active_quad.update_coords(updated_coords)
+            debug.print_board(self)
+            return
 
-            if action == 'TRANSLATE_DOWN':
-                # Could not move down means piece becomes set in board.
-                self.active_quad = None
-                self._update_line_filled()
+        if action == 'TRANSLATE_DOWN':
+            # Could not move down means piece becomes set in board.
+            self.active_quad = None
+            self.update_line_filled()
 
+    def input_handler_callback(self, action):
+        """
+        Callback function for the input handler thread.
+        """
+        if action == 'QUIT':
+            self.game_over = True
+            return
+        self.update_active_quad(action)
 
     def try_update_state(self):
         """
